@@ -1,436 +1,376 @@
-import http.server
-import socketserver
-import threading
+#!/usr/bin/env python3
 import time
 import hashlib
 import random
-import json
 import requests
+import threading
+import sys
+import os
 from datetime import datetime
 
-class NerdMinerV2:
+class TerminalNerdMiner:
     def __init__(self):
         self.mining = False
-        self.stats = {
-            'hash_rate': 0,
-            'total_hashes': 0,
-            'accepted_shares': 0,
-            'rejected_shares': 0,
-            'uptime': 0,
-            'temperature': 45,
-            'block_height': 0,
-            'difficulty': "0",
-            'network_hashrate': "0 EH/s",
-            'btc_price': 0,
-            'pool': "nerdminer.com:3333",
-            'worker': "android",
-            'efficiency': "100%"
-        }
+        self.hash_rate = 0
+        self.total_hashes = 0
+        self.accepted_shares = 0
+        self.uptime = 0
         self.start_time = 0
+        self.temperature = 42
+        self.screen_on = True
+        
+        # Управление кнопками (как в оригинале)
+        self.power_last_press = 0
+        self.volume_last_press = 0
+        self.volume_press_count = 0
+        
+        # Сетевые данные
+        self.btc_price = 0
+        self.block_height = 0
+        self.difficulty = "0"
+        self.network_hashrate = "0 H/s"
+        self.last_update = 0
+        
+        # График
         self.hash_history = []
-        self.last_shares = []
         
-        # Загружаем реальные данные
-        self.update_network_data()
+        # Цвета для терминала
+        self.COLORS = {
+            'green': '\033[92m',
+            'red': '\033[91m',
+            'yellow': '\033[93m',
+            'blue': '\033[94m',
+            'magenta': '\033[95m',
+            'cyan': '\033[96m',
+            'white': '\033[97m',
+            'gray': '\033[90m',
+            'reset': '\033[0m',
+            'bold': '\033[1m'
+        }
         
-    def update_network_data(self):
-        """Получение реальных данных из сети"""
+    def color_text(self, text, color):
+        """Добавляет цвет к тексту"""
+        return f"{self.COLORS.get(color, '')}{text}{self.COLORS['reset']}"
+    
+    def clear_screen(self):
+        """Очистка экрана"""
+        os.system('clear' if os.name == 'posix' else 'cls')
+    
+    def fetch_btc_price(self):
+        """Получение цены BTC"""
         try:
-            # BTC цена
-            response = requests.get("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd", timeout=5)
+            response = requests.get(
+                "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd",
+                timeout=10
+            )
             if response.status_code == 200:
-                self.stats['btc_price'] = response.json()['bitcoin']['usd']
-            
-            # Данные блокчейна
-            response = requests.get("https://blockchain.info/q/getblockcount", timeout=5)
+                data = response.json()
+                self.btc_price = data['bitcoin']['usd']
+                return True
+        except:
+            pass
+        return False
+    
+    def fetch_blockchain_data(self):
+        """Получение данных блокчейна"""
+        try:
+            # Высота блока
+            response = requests.get("https://blockchain.info/q/getblockcount", timeout=10)
             if response.status_code == 200:
-                self.stats['block_height'] = int(response.text)
+                self.block_height = int(response.text)
             
-            response = requests.get("https://blockchain.info/q/getdifficulty", timeout=5)
+            # Сложность
+            response = requests.get("https://blockchain.info/q/getdifficulty", timeout=10)
             if response.status_code == 200:
                 diff = float(response.text)
-                self.stats['difficulty'] = f"{diff/1e12:.2f} T"
-                self.stats['network_hashrate'] = f"{diff * 2**32 / 600 / 1e18:.2f} EH/s"
                 
-        except Exception as e:
-            print(f"Network data error: {e}")
+                # Форматирование сложности
+                if diff >= 1e12:
+                    self.difficulty = f"{diff/1e12:.2f}T"
+                elif diff >= 1e9:
+                    self.difficulty = f"{diff/1e9:.2f}G"
+                else:
+                    self.difficulty = f"{diff/1e6:.2f}M"
+                
+                # Расчет сетевого хешрейта
+                network_hash = diff * 2**32 / 600
+                if network_hash >= 1e18:
+                    self.network_hashrate = f"{network_hash/1e18:.2f} EH/s"
+                elif network_hash >= 1e15:
+                    self.network_hashrate = f"{network_hash/1e15:.2f} PH/s"
+                else:
+                    self.network_hashrate = f"{network_hash/1e12:.2f} TH/s"
+                    
+            return True
+        except:
+            pass
+        return False
+    
+    def update_network_data(self):
+        """Обновление всех сетевых данных"""
+        if time.time() - self.last_update > 60:
+            self.fetch_btc_price()
+            self.fetch_blockchain_data()
+            self.last_update = time.time()
+    
+    def handle_power_button(self):
+        """Обработка кнопки POWER - экран вкл/выкл"""
+        current_time = time.time()
+        
+        # Одинарное нажатие - переключаем экран
+        if current_time - self.power_last_press > 0.5:
+            self.screen_on = not self.screen_on
+            if not self.screen_on:
+                self.clear_screen()
+                print(self.color_text("📱 Screen OFF - Press P to turn on", "yellow"))
+            
+        self.power_last_press = current_time
+        
+    def handle_volume_button(self):
+        """Обработка кнопки VOLUME - старт/стоп майнинг"""
+        current_time = time.time()
+        
+        # Сбрасываем счетчик если прошло больше 1 секунды
+        if current_time - self.volume_last_press > 1.0:
+            self.volume_press_count = 0
+            
+        self.volume_press_count += 1
+        self.volume_last_press = current_time
+        
+        # Двойное нажатие = старт/стоп майнинг
+        if self.volume_press_count == 2:
+            if self.mining:
+                self.stop_mining()
+            else:
+                self.start_mining()
+            self.volume_press_count = 0
     
     def start_mining(self):
-        if self.mining:
-            return
+        """Запуск майнинга"""
+        if not self.screen_on:
+            self.screen_on = True
             
         self.mining = True
         self.start_time = time.time()
-        self.stats.update({
-            'hash_rate': 0,
-            'total_hashes': 0,
-            'accepted_shares': 0,
-            'rejected_shares': 0,
-            'uptime': 0
-        })
-        self.hash_history = []
-        self.last_shares = []
         
-        # Запуск майнинга
-        for i in range(2):
-            thread = threading.Thread(target=self.mine_worker, daemon=True)
-            thread.start()
-            
-        # Обновление статистики
-        stats_thread = threading.Thread(target=self.stats_worker, daemon=True)
-        stats_thread.start()
-        
-        # Обновление сетевых данных
-        network_thread = threading.Thread(target=self.network_worker, daemon=True)
-        network_thread.start()
-        
-        print("🚀 NerdMiner v2 started!")
+        mining_thread = threading.Thread(target=self.mining_worker, daemon=True)
+        mining_thread.start()
+        return True
     
     def stop_mining(self):
+        """Остановка майнинга"""
         self.mining = False
-        print("⏹️ NerdMiner stopped!")
+        self.hash_rate = 0
     
-    def mine_worker(self):
-        worker_id = threading.get_ident()
+    def mining_worker(self):
+        """Рабочий поток майнинга"""
         local_hashes = 0
         last_stat_time = time.time()
         
         while self.mining:
-            # Имитация реального майнинга
-            data = f"nerdminer{worker_id}{time.time()}{random.randint(0, 1000000000)}"
+            # Имитация майнинга SHA-256
+            data = f"nerdminer{time.time()}{random.randint(0, 1000000)}"
             hash_result = hashlib.sha256(data.encode()).hexdigest()
             
-            self.stats['total_hashes'] += 1
+            self.total_hashes += 1
             local_hashes += 1
-            
-            # Найден шар (каждые ~1000 хешей)
-            if random.random() < 0.001:
-                self.stats['accepted_shares'] += 1
-                self.last_shares.append({
-                    'time': datetime.now().strftime("%H:%M:%S"),
-                    'diff': random.randint(1000, 10000)
-                })
-                if len(self.last_shares) > 5:
-                    self.last_shares.pop(0)
             
             # Обновление хешрейта каждую секунду
             current_time = time.time()
             if current_time - last_stat_time >= 1.0:
-                self.stats['hash_rate'] = local_hashes
+                self.hash_rate = local_hashes
                 local_hashes = 0
                 last_stat_time = current_time
+                
+                # Обновляем историю для графика
+                self.hash_history.append(self.hash_rate)
+                if len(self.hash_history) > 20:
+                    self.hash_history.pop(0)
             
-            time.sleep(0.001)
+            # Случайное нахождение шара
+            if random.random() < 0.001:
+                self.accepted_shares += 1
+                
+            time.sleep(0.003)
     
-    def stats_worker(self):
-        while self.mining:
-            self.stats['uptime'] = time.time() - self.start_time
-            self.stats['temperature'] = random.randint(40, 60)
-            
-            # Добавление в историю для графика
-            self.hash_history.append(self.stats['hash_rate'])
-            if len(self.hash_history) > 30:
-                self.hash_history.pop(0)
-            
-            time.sleep(1)
-    
-    def network_worker(self):
-        while self.mining:
-            self.update_network_data()
-            time.sleep(60)  # Обновление каждую минуту
-    
-    def get_efficiency(self):
-        total = self.stats['accepted_shares'] + self.stats['rejected_shares']
-        if total == 0:
-            return "100%"
-        eff = (self.stats['accepted_shares'] / total) * 100
-        return f"{eff:.1f}%"
-    
-    def format_time(self, seconds):
-        hours = int(seconds // 3600)
-        minutes = int((seconds % 3600) // 60)
-        seconds = int(seconds % 60)
-        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-    
-    def generate_sparkline_data(self):
-        """Генерация данных для спарклайна"""
+    def draw_graph(self, width=40, height=8):
+        """Рисует ASCII график хешрейта"""
         if not self.hash_history:
-            return []
+            return " " * width + "\n" * height
         
-        max_val = max(self.hash_history)
-        if max_val == 0:
-            return [0] * len(self.hash_history)
+        max_val = max(self.hash_history) if max(self.hash_history) > 0 else 1
+        graph = []
         
-        return [int((h / max_val) * 100) for h in self.hash_history]
-
-class NerdMinerHandler(http.server.SimpleHTTPRequestHandler):
-    def __init__(self, *args, **kwargs):
-        self.miner = kwargs.pop('miner')
-        super().__init__(*args, **kwargs)
-    
-    def do_GET(self):
-        if self.path == '/':
-            self.serve_main_page()
-        elif self.path == '/api/stats':
-            self.serve_stats()
-        elif self.path == '/api/start':
-            self.miner.start_mining()
-            self.send_json({'status': 'started'})
-        elif self.path == '/api/stop':
-            self.miner.stop_mining()
-            self.send_json({'status': 'stopped'})
-        else:
-            super().do_GET()
-    
-    def serve_main_page(self):
-        html = """
-        <!DOCTYPE html>
-        <html lang="en">
-        <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>NerdMiner v2 - Android</title>
-            <style>
-                * { margin: 0; padding: 0; box-sizing: border-box; }
-                body { 
-                    font-family: 'Courier New', monospace;
-                    background: #0a0a0a;
-                    color: #00ff00;
-                    padding: 10px;
-                    line-height: 1.4;
-                }
-                .container { max-width: 400px; margin: 0 auto; }
-                .header { 
-                    text-align: center; 
-                    border-bottom: 1px solid #00ff00;
-                    padding: 10px 0;
-                    margin-bottom: 10px;
-                }
-                .stats { margin-bottom: 15px; }
-                .stat-row { 
-                    display: flex; 
-                    justify-content: space-between;
-                    margin-bottom: 5px;
-                    font-size: 14px;
-                }
-                .sparkline {
-                    height: 40px;
-                    background: #001100;
-                    margin: 10px 0;
-                    position: relative;
-                }
-                .sparkline-line {
-                    position: absolute;
-                    bottom: 0;
-                    width: 100%;
-                    height: 100%;
-                    stroke: #00ff00;
-                    fill: none;
-                    stroke-width: 2;
-                }
-                .controls {
-                    display: grid;
-                    grid-template-columns: 1fr 1fr;
-                    gap: 10px;
-                    margin: 15px 0;
-                }
-                button {
-                    background: #003300;
-                    color: #00ff00;
-                    border: 1px solid #00ff00;
-                    padding: 10px;
-                    font-family: 'Courier New';
-                    cursor: pointer;
-                }
-                button:active { background: #005500; }
-                .shares { margin-top: 15px; }
-                .share { 
-                    font-size: 12px; 
-                    margin-bottom: 3px;
-                    color: #00cc00;
-                }
-                .status {
-                    text-align: center;
-                    padding: 5px;
-                    margin: 10px 0;
-                    background: #002200;
-                    border: 1px solid #00ff00;
-                }
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <div class="header">
-                    <h2>NERDMINER v2</h2>
-                    <div>ANDROID EDITION</div>
-                </div>
-                
-                <div class="status" id="status">STOPPED</div>
-                
-                <div class="stats" id="stats">
-                    <!-- Stats will be loaded by JavaScript -->
-                </div>
-                
-                <div class="sparkline" id="sparkline">
-                    <svg viewBox="0 0 100 40" class="sparkline-line" id="sparkline-svg"></svg>
-                </div>
-                
-                <div class="controls">
-                    <button onclick="startMining()">START</button>
-                    <button onclick="stopMining()">STOP</button>
-                </div>
-                
-                <div class="shares" id="shares">
-                    <div class="share">No shares yet</div>
-                </div>
-            </div>
-
-            <script>
-                let updateInterval;
-                
-                function updateStats() {
-                    fetch('/api/stats')
-                        .then(r => r.json())
-                        .then(data => {
-                            // Update status
-                            document.getElementById('status').textContent = 
-                                data.mining ? 'MINING 🟢' : 'STOPPED 🔴';
-                            
-                            // Update stats
-                            document.getElementById('stats').innerHTML = `
-                                <div class="stat-row">
-                                    <span>Hash Rate:</span>
-                                    <span>${data.hash_rate.toLocaleString()} H/s</span>
-                                </div>
-                                <div class="stat-row">
-                                    <span>Total Hashes:</span>
-                                    <span>${data.total_hashes.toLocaleString()}</span>
-                                </div>
-                                <div class="stat-row">
-                                    <span>Shares:</span>
-                                    <span>A: ${data.accepted_shares} R: ${data.rejected_shares}</span>
-                                </div>
-                                <div class="stat-row">
-                                    <span>Efficiency:</span>
-                                    <span>${data.efficiency}</span>
-                                </div>
-                                <div class="stat-row">
-                                    <span>Uptime:</span>
-                                    <span>${data.uptime}</span>
-                                </div>
-                                <div class="stat-row">
-                                    <span>Block:</span>
-                                    <span>${data.block_height.toLocaleString()}</span>
-                                </div>
-                                <div class="stat-row">
-                                    <span>Difficulty:</span>
-                                    <span>${data.difficulty}</span>
-                                </div>
-                                <div class="stat-row">
-                                    <span>BTC Price:</span>
-                                    <span>$${data.btc_price.toLocaleString()}</span>
-                                </div>
-                            `;
-                            
-                            // Update sparkline
-                            updateSparkline(data.sparkline);
-                            
-                            // Update shares
-                            if (data.last_shares.length > 0) {
-                                document.getElementById('shares').innerHTML = 
-                                    data.last_shares.map(share => 
-                                        `<div class="share">${share.time} - Diff: ${share.diff}</div>`
-                                    ).join('');
-                            }
-                        });
-                }
-                
-                function updateSparkline(data) {
-                    if (data.length === 0) return;
-                    
-                    const svg = document.getElementById('sparkline-svg');
-                    let path = 'M0,40 ';
-                    
-                    data.forEach((value, index) => {
-                        const x = (index / (data.length - 1)) * 100;
-                        const y = 40 - (value / 100) * 40;
-                        path += `L${x},${y} `;
-                    });
-                    
-                    svg.innerHTML = `<path d="${path}" />`;
-                }
-                
-                function startMining() {
-                    fetch('/api/start').then(() => {
-                        if (!updateInterval) {
-                            updateInterval = setInterval(updateStats, 2000);
-                        }
-                    });
-                }
-                
-                function stopMining() {
-                    fetch('/api/stop');
-                }
-                
-                // Start updating stats
-                updateInterval = setInterval(updateStats, 2000);
-                updateStats();
-            </script>
-        </body>
-        </html>
-        """
-        
-        self.send_response(200)
-        self.send_header('Content-type', 'text/html')
-        self.end_headers()
-        self.wfile.write(html.encode())
-    
-    def serve_stats(self):
-        stats = {
-            'mining': self.miner.mining,
-            'hash_rate': self.miner.stats['hash_rate'],
-            'total_hashes': self.miner.stats['total_hashes'],
-            'accepted_shares': self.miner.stats['accepted_shares'],
-            'rejected_shares': self.miner.stats['rejected_shares'],
-            'uptime': self.miner.format_time(self.miner.stats['uptime']),
-            'efficiency': self.miner.get_efficiency(),
-            'block_height': self.miner.stats['block_height'],
-            'difficulty': self.miner.stats['difficulty'],
-            'btc_price': self.miner.stats['btc_price'],
-            'sparkline': self.miner.generate_sparkline_data(),
-            'last_shares': self.miner.last_shares
-        }
-        self.send_json(stats)
-    
-    def send_json(self, data):
-        self.send_response(200)
-        self.send_header('Content-type', 'application/json')
-        self.end_headers()
-        self.wfile.write(json.dumps(data).encode())
-
-def main():
-    miner = NerdMinerV2()
-    
-    # Запуск веб-сервера
-    port = 8080
-    handler = lambda *args: NerdMinerHandler(*args, miner=miner)
-    
-    with socketserver.TCPServer(("", port), handler) as httpd:
-        print(f"🌐 NerdMiner v2 Web Interface: http://localhost:{port}")
-        print("📱 Open this URL in your phone's browser")
-        print("🎛️ Controls: START/STOP mining from web interface")
-        
-        # Автозапуск браузера (если возможно)
-        try:
-            import webbrowser
-            webbrowser.open(f"http://localhost:{port}")
-        except:
-            pass
+        for h in range(height, 0, -1):
+            line = ""
+            threshold = (h / height) * max_val
             
+            for value in self.hash_history:
+                if value >= threshold:
+                    line += "█"
+                else:
+                    line += " "
+            
+            # Обрезаем или дополняем до нужной ширины
+            if len(line) > width:
+                line = line[-width:]
+            else:
+                line = " " * (width - len(line)) + line
+                
+            graph.append(line)
+        
+        return "\n".join(graph)
+    
+    def format_hashrate(self, hashrate):
+        """Форматирует хешрейт для отображения"""
+        if hashrate >= 1000:
+            return f"{hashrate/1000:.1f}k H/s"
+        else:
+            return f"{hashrate:.0f} H/s"
+    
+    def format_number(self, number):
+        """Форматирует большие числа"""
+        if number >= 1e6:
+            return f"{number/1e6:.1f}M"
+        elif number >= 1e3:
+            return f"{number/1e3:.1f}K"
+        else:
+            return f"{number:.0f}"
+    
+    def display_ui(self):
+        """Отображает основной интерфейс"""
+        if not self.screen_on:
+            return
+            
+        self.clear_screen()
+        
+        # Заголовок
+        print(self.color_text("╔══════════════════════════════════════════════════╗", "green"))
+        print(self.color_text("║              NERDMINER v2 - TERMINAL            ║", "green"))
+        print(self.color_text("╚══════════════════════════════════════════════════╝", "green"))
+        print()
+        
+        # Статус майнинга
+        status_color = "green" if self.mining else "red"
+        status_text = "MINING" if self.mining else "STOPPED"
+        print(f"{self.color_text('STATUS:', 'bold')} {self.color_text(status_text, status_color)}")
+        
+        # Основная статистика
+        print(f"{self.color_text('HASHRATE:', 'bold')} {self.color_text(self.format_hashrate(self.hash_rate), 'cyan')}")
+        print(f"{self.color_text('SHARES:', 'bold')} {self.color_text(str(self.accepted_shares), 'white')}")
+        print(f"{self.color_text('TOTAL HASHES:', 'bold')} {self.color_text(self.format_number(self.total_hashes), 'white')}")
+        
+        # Аптайм
+        if self.mining:
+            self.uptime = time.time() - self.start_time
+            hours = int(self.uptime // 3600)
+            minutes = int((self.uptime % 3600) // 60)
+            seconds = int(self.uptime % 60)
+            uptime_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+        else:
+            uptime_str = "00:00:00"
+        
+        print(f"{self.color_text('UPTIME:', 'bold')} {self.color_text(uptime_str, 'yellow')}")
+        print(f"{self.color_text('TEMPERATURE:', 'bold')} {self.color_text(f'{self.temperature}°C', 'magenta')}")
+        print()
+        
+        # График хешрейта
+        print(self.color_text("HASHRATE GRAPH:", "bold"))
+        graph = self.draw_graph()
+        print(self.color_text(graph, "green"))
+        print()
+        
+        # Сетевые данные
+        print(self.color_text("NETWORK DATA:", "bold"))
+        print(f"{self.color_text('BLOCK:', 'gray')} {self.color_text(f'{self.block_height:,}', 'white')}")
+        print(f"{self.color_text('BTC PRICE:', 'gray')} {self.color_text(f'${self.btc_price:,.0f}', 'yellow')}")
+        print(f"{self.color_text('DIFFICULTY:', 'gray')} {self.color_text(self.difficulty, 'white')}")
+        print(f"{self.color_text('NETWORK HASHRATE:', 'gray')} {self.color_text(self.network_hashrate, 'cyan')}")
+        print()
+        
+        # Управление (как в оригинале)
+        print(self.color_text("PHONE BUTTON EMULATION:", "bold"))
+        print(self.color_text("[P] Power Button (Screen ON/OFF)", "gray"))
+        print(self.color_text("[V] Volume Button x2 (Start/Stop Mining)", "gray"))
+        print(self.color_text("[R] Refresh Network Data", "gray"))
+        print(self.color_text("[Q] Quit", "gray"))
+        print()
+        
+        # Обновление температуры
+        if self.mining:
+            base_temp = 40
+            load_factor = min(self.hash_rate / 50000, 1.0)
+            self.temperature = base_temp + int(load_factor * 20)
+        else:
+            self.temperature = max(35, self.temperature - 1)
+    
+    def run(self):
+        """Основной цикл программы"""
+        print(self.color_text("Initializing NerdMiner...", "yellow"))
+        
+        # Первоначальная загрузка данных
+        self.update_network_data()
+        
+        # Запускаем обновление сетевых данных в фоне
+        def network_updater():
+            while True:
+                self.update_network_data()
+                time.sleep(30)
+        
+        network_thread = threading.Thread(target=network_updater, daemon=True)
+        network_thread.start()
+        
+        # Основной цикл
         try:
-            httpd.serve_forever()
+            while True:
+                if self.screen_on:
+                    self.display_ui()
+                
+                # Неблокирующий ввод
+                if sys.platform != 'win32':
+                    import select
+                    import tty
+                    import termios
+                    
+                    old_settings = termios.tcgetattr(sys.stdin)
+                    try:
+                        tty.setraw(sys.stdin.fileno())
+                        if select.select([sys.stdin], [], [], 0.1)[0]:
+                            key = sys.stdin.read(1).lower()
+                            
+                            if key == 'p':  # Power button
+                                self.handle_power_button()
+                            elif key == 'v':  # Volume button
+                                self.handle_volume_button()
+                            elif key == 'r':  # Refresh
+                                self.update_network_data()
+                            elif key == 'q':  # Quit
+                                break
+                                
+                    finally:
+                        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
+                else:
+                    # Для Windows
+                    import msvcrt
+                    if msvcrt.kbhit():
+                        key = msvcrt.getch().decode().lower()
+                        if key == 'p':
+                            self.handle_power_button()
+                        elif key == 'v':
+                            self.handle_volume_button()
+                        elif key == 'r':
+                            self.update_network_data()
+                        elif key == 'q':
+                            break
+                
+                time.sleep(0.5)
+                
         except KeyboardInterrupt:
-            print("\n👋 NerdMiner stopped!")
+            print(self.color_text("\nShutting down NerdMiner...", "yellow"))
+        finally:
+            self.stop_mining()
+            print(self.color_text("NerdMiner stopped.", "red"))
 
 if __name__ == "__main__":
-    main()
+    miner = TerminalNerdMiner()
+    miner.run()
